@@ -1,0 +1,119 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+jobs:
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/src \
+            semgrep/semgrep semgrep \
+            --config auto --config p/java --config p/spring \
+            --sarif --output /src/semgrep.sarif /src
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+
+  trivy-fs:
+    name: Trivy Filesystem Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            aquasecurity/trivy:latest fs \
+            --format sarif --output /workspace/trivy-fs.sarif \
+            --severity CRITICAL,HIGH --exit-code 1 \
+            /workspace
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    needs: [sast, trivy-fs]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Build and push image
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/security-scanner:${{ github.sha }}
+        run: |
+          docker build -t $IMAGE .
+          docker push $IMAGE
+
+      - name: Trivy container scan
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/security-scanner:${{ github.sha }}
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ${{ github.workspace }}:/workspace \
+            aquasecurity/trivy:latest image \
+            --format sarif --output /workspace/trivy-image.sarif \
+            --severity CRITICAL,HIGH --exit-code 1 \
+            $IMAGE
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+
+      - name: Generate SBOM
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/security-scanner:${{ github.sha }}
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ${{ github.workspace }}:/out \
+            anchore/syft:latest \
+            $IMAGE \
+            -o spdx-json=/out/sbom.spdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.spdx.json
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name security-scanner-cluster --region us-west-2
+
+      - name: Helm deploy
+        run: |
+          helm upgrade --install security-scanner ./helm/security-scanner \
+            --set image.repository=${{ steps.ecr.outputs.registry }}/security-scanner \
+            --set image.tag=${{ github.sha }} \
+            --set db.url=${{ secrets.DB_URL }} \
+            --set db.username=${{ secrets.DB_USERNAME }} \
+            --set db.password=${{ secrets.DB_PASSWORD }} \
+            --set ingress.host=${{ vars.APP_HOST }} \
+            --wait --timeout 5m
