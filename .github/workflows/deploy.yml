@@ -143,7 +143,7 @@ jobs:
             "$IMAGE_REF" \
             -o spdx-json=/out/sbom.spdx.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom-${{ github.sha }}
           path: sbom.spdx.json
