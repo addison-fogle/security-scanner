@@ -9,8 +9,65 @@ permissions:
   security-events: write
 
 jobs:
+  app:
+    name: Java Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: temurin
+          cache: maven
+
+      - name: Test
+        run: ./mvnw test
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: Terraform fmt
+        run: terraform -chdir=terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform -chdir=terraform init -backend=false
+
+      - name: Terraform validate
+        run: terraform -chdir=terraform validate
+
+      - name: TFLint
+        run: |
+          tflint --init
+          tflint --config ../.tflint.hcl --chdir=terraform
+
+  helm:
+    name: Helm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Helm lint
+        run: helm lint helm/security-scanner
+
+      - name: Render manifests
+        run: |
+          helm template security-scanner helm/security-scanner \
+            --set image.repository=example.com/security-scanner \
+            --set scanner.apiKey=test-key \
+            --set db.url=jdbc:postgresql://postgres:5432/testdb \
+            --set db.username=postgres \
+            --set db.password=postgres
+
   sast:
-    name: SAST (Semgrep)
+    name: SAST
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,16 +93,16 @@ jobs:
 
       - uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: "21"
           distribution: temurin
           cache: maven
 
-      - name: Generate SBOM from pom.xml
-        run: mvn org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom -q
+      - name: Generate application SBOM
+        run: ./mvnw org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom -q
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sbom-${{ github.sha }}
+          name: sbom-app-${{ github.sha }}
           path: target/bom.json
 
       - name: Build image
@@ -66,19 +123,20 @@ jobs:
           path: sbom-image.spdx.json
 
   trivy:
-    name: Trivy Scan
+    name: Trivy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Trivy filesystem scan
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            aquasecurity/trivy:latest fs \
-            --format sarif --output /workspace/trivy-fs.sarif \
-            --severity CRITICAL,HIGH --exit-code 1 \
-            /workspace
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
 
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
@@ -89,14 +147,13 @@ jobs:
         run: docker build -t security-scanner:${{ github.sha }} .
 
       - name: Trivy container scan
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v ${{ github.workspace }}:/workspace \
-            aquasecurity/trivy:latest image \
-            --format sarif --output /workspace/trivy-image.sarif \
-            --severity CRITICAL,HIGH --exit-code 1 \
-            security-scanner:${{ github.sha }}
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: security-scanner:${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
 
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
