@@ -100,7 +100,7 @@ jobs:
       - name: Generate application SBOM
         run: ./mvnw org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom -q
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom-app-${{ github.sha }}
           path: target/bom.json
@@ -117,7 +117,7 @@ jobs:
             security-scanner:${{ github.sha }} \
             -o spdx-json=/out/sbom-image.spdx.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom-image-${{ github.sha }}
           path: sbom-image.spdx.json
